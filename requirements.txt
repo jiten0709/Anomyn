@@ -1,7 +1,10 @@
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0
+click==8.3.3
+dotenv==0.9.9
 fastapi==0.136.1
+h11==0.16.0
 idna==3.13
 iniconfig==2.3.0
 joblib==1.5.3
@@ -14,6 +17,8 @@ pydantic-core==2.46.4
 pygments==2.20.0
 pytest==9.0.3
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.27
 scikit-learn==1.8.0
 scipy==1.17.1
 six==1.17.0
@@ -22,3 +27,4 @@ starlette==1.0.0
 threadpoolctl==3.6.0
 typing-extensions==4.15.0
 typing-inspection==0.4.2
+uvicorn==0.46.0

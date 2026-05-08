@@ -15,7 +15,7 @@ from app.services.validation import ValidationService, ValidationReport
 from app.utils.logging_setup import get_logger
 logger = get_logger(__name__, log_file="api.log")
 
-router = APIRouter(prefix="/api/v1/compliance", tags=["Compliance Validation Agent"])
+router = APIRouter(prefix="/api/v1", tags=["Anomyn"])
 
 # --- mock database for prototype ---
 # in production, these would be fetched via a db session dependency (e.g., SQLAlchemy)
@@ -112,8 +112,7 @@ async def confirm_schema(payload: SchemaConfirmationRequest):
 @router.post("/validate/{schema_name}", response_model=ValidationSummaryResponse)
 async def run_compliance_validation(schema_name: str, file: UploadFile = File(...)):
     """
-    Step 3: Upload a dataset to validate it against the confirmed schema, 
-    deterministic rules, and ML anomaly detection.
+    Step 3: Upload a dataset to validate it against the confirmed schema, deterministic rules, and ML anomaly detection.
     """
     # check if schema exists
     if schema_name not in MOCK_DB_SCHEMA_CONFIG:
@@ -140,9 +139,8 @@ async def run_compliance_validation(schema_name: str, file: UploadFile = File(..
 
     try:
         # stream the file securely using our SafeFileParser
-        row_iterator = await SafeFileParser.process_upload(file)
         
-        for raw_row in row_iterator:
+        async for raw_row in SafeFileParser.process_upload(file):
             summary["total_processed"] += 1
             
             # execute full compliance pipeline
@@ -168,3 +166,81 @@ async def run_compliance_validation(schema_name: str, file: UploadFile = File(..
     except Exception as e:
         logger.exception("🚨 [routes] Validation execution failed.")
         raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
+    
+@router.post("/train-model/{schema_name}", response_model=Dict[str, Any])
+async def auto_train_ml_model(schema_name: str, file: UploadFile = File(...)):
+    """
+    Enterprise Zero-Shot Training Pipeline.
+    Automatically parses the schema, builds the feature lists, trains the Isolation Forest,
+    and hot-reloads the model into live memory.
+    """
+    # 1. verify the schema exists in our "database"
+    if schema_name not in MOCK_DB_SCHEMA_CONFIG:
+        logger.exception(f"🚨 [routes] ML training attempted with non-existent schema: {schema_name}")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Schema '{schema_name}' not found. Please profile and confirm it first."
+        )
+        
+    schema_config = MOCK_DB_SCHEMA_CONFIG[schema_name]
+    
+    # 2. automated feature engineering (The zero-shot magic)
+    numerical_cols = []
+    categorical_cols = []
+    
+    for field_name, config in schema_config.items():
+        field_type = config.get("type", "string")
+        
+        # we don't want to train the ml model on unique IDs (it ruins the math)
+        # so we safely ignore fields with 'id' in the name
+        if "id" in field_name.lower():
+            continue
+            
+        if field_type in ["float", "integer"]:
+            numerical_cols.append(field_name)
+        else:
+            categorical_cols.append(field_name)
+            
+    logger.info(f"💬 [routes] Auto-extracted Numerical features: {numerical_cols}")
+    logger.info(f"💬 [routes] Auto-extracted Categorical features: {categorical_cols}")
+
+    if not numerical_cols and not categorical_cols:
+        logger.exception("🚨 [routes] No usable features found for ML training after schema analysis.")
+        raise HTTPException(status_code=400, detail="No usable features found for ML training.")
+
+    # 3. Securely load the dataset into memory
+    await SafeFileParser.validate_file_size(file)
+    try:
+        contents = await file.read()
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(contents))
+        elif file.filename.endswith('.json'):
+            df = pd.read_json(io.BytesIO(contents))
+        else:
+            raise HTTPException(status_code=415, detail="Unsupported file format.")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read training data: {str(e)}")
+
+    # 4. train and hot-reload!
+    # by calling this on our global ml_engine_instance, it overwrites the model in memory so the very next api call to /validate will use the newly trained brain.
+    success = ml_engine_instance.train_model(
+        df=df,
+        numerical_cols=numerical_cols,
+        categorical_cols=categorical_cols,
+        contamination=0.05 # Assuming 5% anomaly rate
+    )
+
+    if success:
+        logger.info(f"✅ [routes] ML Model trained and hot-reloaded successfully for schema '{schema_name}'.")
+        return {
+            "message": "Model successfully trained and hot-reloaded into memory.",
+            "features_used": {
+                "numerical": numerical_cols,
+                "categorical": categorical_cols
+            },
+            "training_samples": len(df)
+        }
+    else:
+        logger.error(f"❌ [routes] ML Model training failed for schema '{schema_name}'. Check server logs for details.")
+        raise HTTPException(status_code=500, detail="ML Model training failed. Check server logs.")

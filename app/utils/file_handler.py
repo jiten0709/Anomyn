@@ -1,5 +1,4 @@
-import csv
-import json
+import csv, json, asyncio
 from typing import Any, Dict, AsyncIterator, Iterator
 from fastapi import UploadFile, HTTPException
 
@@ -46,15 +45,17 @@ class SafeFileParser:
         Streams a CSV file row by row. 
         Highly memory efficient for large files.
         """
-        # we decode the byte stream into a string stream on the fly
+        file.file.seek(0)
         text_stream = (line.decode("utf-8") for line in file.file)
         
         try:
             reader = csv.DictReader(text_stream)
-            for row in reader:
-                # DictReader values are all strings; we yield them raw
-                # our schema_engine and pydantic will handle the type casting!
+            for i, row in enumerate(reader):
                 yield dict(row)
+                
+                # yield control to event loop every 1,000 rows to prevent blocking concurrent API requests
+                if i % 1000 == 0:
+                    await asyncio.sleep(0)
         except csv.Error as e:
             logger.error(f"❌ [file handler] CSV parsing error: {e}")
             raise HTTPException(status_code=400, detail="Malformed CSV file structure.")

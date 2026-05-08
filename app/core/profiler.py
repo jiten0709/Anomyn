@@ -1,9 +1,15 @@
-import pandas as pd
+import pandas as pd, os
 from typing import Any, Dict
 
 # logging setup
 from app.utils.logging_setup import get_logger
 logger = get_logger(__name__, log_file="core.log")
+
+# env variables
+from dotenv import load_dotenv
+load_dotenv()
+
+PROFILER_SAMPLE_SIZE = int(os.getenv("PROFILER_SAMPLE_SIZE", 100))
 
 def map_pandas_dtype_to_engine_type(pd_dtype: str) -> str:
     """
@@ -23,7 +29,7 @@ def map_pandas_dtype_to_engine_type(pd_dtype: str) -> str:
     else:
         return 'string'
 
-def analyze_dataset(df: pd.DataFrame, sample_size: int = 1000) -> Dict[str, Dict[str, Any]]:
+def analyze_dataset(df: pd.DataFrame, sample_size: int = PROFILER_SAMPLE_SIZE) -> Dict[str, Dict[str, Any]]:
     """
     Profiles a pandas DataFrame to infer a base schema configuration.
     
