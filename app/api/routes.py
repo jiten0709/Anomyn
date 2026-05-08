@@ -1,44 +1,170 @@
+from typing import Any, Dict, List
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from pydantic import BaseModel, Field
 import pandas as pd
 import io
 
+# import internal modules
+from app.utils.file_handler import SafeFileParser
+from app.core.profiler import analyze_dataset
+from app.core.schema_engine import clear_schema_cache
+from app.core.ml_engine import MLEngine
+from app.services.validation import ValidationService, ValidationReport
+
 # logging setup
 from app.utils.logging_setup import get_logger
-logger = get_logger(__name__, log_file="routes.log")
+logger = get_logger(__name__, log_file="api.log")
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1/compliance", tags=["Compliance Validation Agent"])
 
-@router.post("/upload-dataset/")
-async def upload_and_profile_dataset(file: UploadFile = File(...)):
+# --- mock database for prototype ---
+# in production, these would be fetched via a db session dependency (e.g., SQLAlchemy)
+MOCK_DB_SCHEMA_CONFIG = {}
+MOCK_DB_RULES = [
+    {
+        "rule_name": "high_value_transaction_limit",
+        "rule_type": "THRESHOLD",
+        "target_field": "amount",
+        "parameters": {"operator": "<=", "value": 50000},
+        "severity": "CRITICAL"
+    }
+]
+
+# initialize ml engine globally (singleton pattern for api)
+ml_engine_instance = MLEngine()
+
+# --- request/response pydantic models ---
+
+class SchemaConfirmationRequest(BaseModel):
+    schema_name: str = Field(..., description="A unique name for the schema configuration")
+    field_definitions: Dict[str, Dict[str, Any]] = Field(..., description="The confirmed field definitions with types and constraints")
+
+class SchemaConfirmationResponse(BaseModel):
+    message: str = Field(..., description="Confirmation message about the schema")
+    schema_name: str = Field(..., description="The name of the confirmed schema")
+
+class ValidationSummaryResponse(BaseModel):
+    total_processed: int = Field(..., description="Total number of records processed")
+    total_passed: int = Field(..., description="Total number of records that passed all validations")
+    total_failed: int = Field(..., description="Total number of records that failed any validation")
+    total_warnings: int = Field(..., description="Total number of records that triggered warnings")
+    reports: List[ValidationReport] = Field(..., description="Detailed validation reports for each record")
+
+# --- endpoints ---
+
+@router.post("/profile-dataset/", response_model=Dict[str, Any])
+async def profile_uploaded_dataset(file: UploadFile = File(...)):
     """
-    Accepts a user dataset, parses it, and returns an inferred schema for the user to confirm.
+    Step 1: Upload a dataset to infer its schema automatically.
+    This fulfills the Zero-Shot / Human-in-the-Loop requirement.
     """
-    logger.info(f"📂 Received file upload: {file.filename} ({file.content_type})")
-    if not file.filename.endswith(('.csv', '.json')):
-        logger.warning(f"⚠️ Unsupported file type: {file.filename}")
-        raise HTTPException(status_code=400, detail="Only CSV or JSON files are supported.")
-    
-    # read file content securely into memory
-    contents = await file.read()
+    await SafeFileParser.validate_file_size(file)
     
     try:
-        # pass to pandas for initial profiling
+        contents = await file.read()
+        
+        # load into pandas for profiling (handling csv or json)
         if file.filename.endswith('.csv'):
+            logger.info(f"💬 [routes] Profiling dataset from file: {file.filename}")
             df = pd.read_csv(io.BytesIO(contents))
-        else:
+        elif file.filename.endswith('.json'):
+            logger.info(f"💬 [routes] Profiling dataset from file: {file.filename}")
             df = pd.read_json(io.BytesIO(contents))
-            
-        # in a real app, you would pass 'df' to app/core/profiler.py here
-        inferred_columns = list(df.columns)
-        row_count = len(df)
-        logger.info(f"✅ Successfully processed file: {file.filename} with {row_count} rows and columns: {inferred_columns}")
+        else:
+            logger.warning(f"⚠️ [routes] Unsupported file format attempted: {file.filename}")
+            raise HTTPException(status_code=415, detail="Unsupported file format.")
+
+        # profile the dataset to infer schema
+        inferred_schema = analyze_dataset(df)
+        
         return {
-            "message": "File uploaded successfully.",
-            "rows_detected": row_count,
-            "inferred_columns": inferred_columns,
-            "next_step": "Please confirm column data types to generate validation schema."
+            "message": "Dataset profiled successfully. Please review and confirm the schema.",
+            "inferred_schema": inferred_schema
         }
         
     except Exception as e:
-        logger.error(f"❌ Error processing file {file.filename}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        logger.error(f"❌ [routes] Error profiling dataset: {e}")
+        raise HTTPException(status_code=500, detail=f"Profiling failed: {str(e)}")
+
+
+@router.post("/confirm-schema/", response_model=SchemaConfirmationResponse)
+async def confirm_schema(payload: SchemaConfirmationRequest):
+    """
+    Step 2: Human-in-the-loop confirms the inferred schema.
+    Saves it to the "database" and clears the dynamic model cache.
+    """
+    schema_name = payload.schema_name
+    
+    # save to mock database
+    MOCK_DB_SCHEMA_CONFIG[schema_name] = payload.field_definitions
+    
+    # critical production step: flush the schema cache so the engine recompiles the new rules
+    clear_schema_cache(schema_name)
+    
+    logger.info(f"💬 [routes] Schema '{schema_name}' confirmed and saved.")
+    
+    return SchemaConfirmationResponse(
+        message="Schema confirmed successfully. Ready for validation.",
+        schema_name=schema_name
+    )
+
+
+@router.post("/validate/{schema_name}", response_model=ValidationSummaryResponse)
+async def run_compliance_validation(schema_name: str, file: UploadFile = File(...)):
+    """
+    Step 3: Upload a dataset to validate it against the confirmed schema, 
+    deterministic rules, and ML anomaly detection.
+    """
+    # check if schema exists
+    if schema_name not in MOCK_DB_SCHEMA_CONFIG:
+        logger.warning(f"⚠️ [routes] Validation attempted with non-existent schema: {schema_name}")
+        raise HTTPException(status_code=404, detail=f"Schema '{schema_name}' not found. Please confirm it first.")
+        
+    schema_config = MOCK_DB_SCHEMA_CONFIG[schema_name]
+    
+    # instantiate the validation service
+    validation_svc = ValidationService(
+        ml_engine=ml_engine_instance,
+        active_rules=MOCK_DB_RULES,
+        schema_config=schema_config,
+        schema_name=schema_name
+    )
+
+    summary = {
+        "total_processed": 0,
+        "total_passed": 0,
+        "total_failed": 0,
+        "total_warnings": 0,
+        "reports": []
+    }
+
+    try:
+        # stream the file securely using our SafeFileParser
+        row_iterator = await SafeFileParser.process_upload(file)
+        
+        for raw_row in row_iterator:
+            summary["total_processed"] += 1
+            
+            # execute full compliance pipeline
+            report = validation_svc.validate_record(raw_row)
+            summary["reports"].append(report)
+            
+            # tally metrics
+            if report.overall_status == "PASS":
+                logger.debug(f"🔍 Record {summary['total_processed']} passed all validations.")
+                summary["total_passed"] += 1
+            elif report.overall_status == "FAIL":
+                logger.debug(f"🔍 Record {summary['total_processed']} failed validation.")
+                summary["total_failed"] += 1
+            elif report.overall_status == "WARNING":
+                logger.debug(f"🔍 Record {summary['total_processed']} triggered a warning.")
+                summary["total_warnings"] += 1
+
+        return summary
+
+    except HTTPException as http_ex:
+        logger.error(f"❌ [routes] HTTP error during validation: {http_ex.detail}")
+        raise http_ex
+    except Exception as e:
+        logger.exception("🚨 [routes] Validation execution failed.")
+        raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
