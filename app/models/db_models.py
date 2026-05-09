@@ -97,3 +97,4 @@ class ValidationFailure(Base):
     resolved_at = Column(DateTime, nullable=True)
 
     log = relationship("ValidationLog", back_populates="failures")
+    

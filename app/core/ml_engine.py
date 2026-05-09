@@ -1,5 +1,5 @@
 import os, joblib, threading, pandas as pd, numpy as np
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
@@ -20,42 +20,45 @@ class MLEngine:
     
     def __init__(self, model_dir: str = "data/models", model_name: str = "anomym_model.joblib"):
         self.model_dir = model_dir
-        self.model_name = model_name
-        self.model_path = os.path.join(model_dir, model_name)
-        self.pipeline: Pipeline = None
+        self.pipelines: Dict[str, Pipeline] = {} # Store multiple models by dataset name
         self._lock = threading.Lock()
+        
+        # ensure model directory exists for local testing
+        os.makedirs(model_dir, exist_ok=True)
+        # Load all existing models at startup
+        self._load_all_models()
         
         # ensure model directory exists for local testing
         os.makedirs(model_dir, exist_ok=True)
         
         self._load_model()
 
-    def _load_model(self):
-        """Loads the trained ML pipeline from disk into memory."""
-        if os.path.exists(self.model_path):
-            try:
-                self.pipeline = joblib.load(self.model_path)
-                logger.info(f"✅ [ml engine] Successfully loaded anomaly detection model from {self.model_path}")
-            except Exception as e:
-                logger.error(f"❌ [ml engine] Failed to load model at {self.model_path}: {e}")
-                self.pipeline = None
-        else:
-            logger.warning(f"⚠️ [ml engine] No trained model found at {self.model_path}. Engine in cold-start mode.")
+    def _load_all_models(self):
+        """Scans the model directory and pre-loads all existing .joblib models."""
+        for filename in os.listdir(self.model_dir):
+            if filename.endswith(".joblib"):
+                dataset_name = filename.replace(".joblib", "")
+                filepath = os.path.join(self.model_dir, filename)
+                try:
+                    pipeline = joblib.load(filepath)
+                    self.pipelines[dataset_name] = pipeline
+                    logger.info(f"✅ Loaded model for dataset: {dataset_name}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to load model {filename}: {e}")
 
-    def train_model(self, df: pd.DataFrame, numerical_cols: List[str], categorical_cols: List[str], contamination: float = 0.01) -> bool:
+    def get_model(self, dataset_name: str) -> Optional[Pipeline]:
+        """Thread-safe retrieval of a specific dataset's model."""
+        with self._lock:
+            return self.pipelines.get(dataset_name)
+
+    def train_model(self, df: pd.DataFrame, dataset_name: str, numerical_cols: List[str], categorical_cols: List[str], contamination: float = 0.01) -> bool:
         """
-        Trains the anomaly detection pipeline on historical data.
-        
-        Args:
-            df (pd.DataFrame): Historical transaction data.
-            numerical_cols (List[str]): Columns to scale (e.g., 'amount').
-            categorical_cols (List[str]): Columns to encode (e.g., 'currency', 'transaction_type').
-            contamination (float): The expected proportion of outliers in the dataset.
+        Trains the anomaly detection pipeline for a specific dataset.
         """
-        logger.info(f"💬 [ml engine] Training Anomaly Detection model on {len(df)} records...")
+        logger.info(f"💬 [ml engine] Training Anomaly Detection model for '{dataset_name}' on {len(df)} records...")
         
         try:
-            # 1. feature engineering pipeline with Imputation to prevent NaN crashes
+            # 1. Feature engineering pipeline
             num_pipeline = Pipeline(steps=[
                 ('imputer', SimpleImputer(strategy='median')),
                 ('scaler', StandardScaler())
@@ -72,45 +75,37 @@ class MLEngine:
                     ('cat', cat_pipeline, categorical_cols)
                 ])
 
-            # 2. build the full pipeline: preprocessing + isolation forest
-            self.pipeline = Pipeline(steps=[
+            # 2. Build pipeline
+            new_pipeline = Pipeline(steps=[
                 ('preprocessor', preprocessor),
                 ('classifier', IsolationForest(contamination=contamination, random_state=42, n_jobs=-1))
             ])
 
-            # 3. train the model
-            self.pipeline.fit(df)
+            # 3. Train
+            new_pipeline.fit(df)
             
-            # 4. swap atomically via lock
+            # 4. Save to disk
+            save_path = os.path.join(self.model_dir, f"{dataset_name}.joblib")
+            joblib.dump(new_pipeline, save_path)
+            
+            # 5. Swap atomically in memory
             with self._lock:
-                self.pipeline = self.pipeline
-            
-            # determine model filename/path
-            save_name = self.model_name
-            if not save_name.lower().endswith(".joblib"):
-                save_name = f"{save_name}.joblib"
-            save_path = os.path.join(self.model_dir, save_name)
-            
-            joblib.dump(self.pipeline, save_path)
-            # update current model_path to the saved model
-            with self._lock:
-                self.model_path = save_path
+                self.pipelines[dataset_name] = new_pipeline
 
             logger.info(f"💬 [ml engine] Model trained and saved to {save_path}")
             return True
             
         except Exception as e:
-            logger.exception(f"🚨 [ml engine] Model training failed: {e}")
+            logger.exception(f"🚨 [ml engine] Model training failed for {dataset_name}: {e}")
             return False
-
-    def evaluate_payload(self, payload: Dict[str, Any]) -> ValidationResult:
+        
+    def evaluate_payload(self, payload: Dict[str, Any], dataset_name: str) -> ValidationResult:
         """
         Scores a single incoming payload for anomalies.
         Returns a strongly-typed ValidationResult object.
         """
         rule_name = "ml_anomaly_detection"
-        with self._lock:
-            pipeline = self.pipeline
+        pipeline = self.get_model(dataset_name)
 
         if not pipeline:
             logger.debug("🔍 [ml engine] No model available. Skipping ML anomaly check.")

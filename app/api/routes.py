@@ -1,8 +1,7 @@
 from typing import Any, Dict, List
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel, Field
-import pandas as pd
-import io
+import pandas as pd, io, os
 
 # import internal modules
 from app.utils.file_handler import SafeFileParser
@@ -76,16 +75,20 @@ async def profile_uploaded_dataset(file: UploadFile = File(...)):
 
         # profile the dataset to infer schema
         inferred_schema = analyze_dataset(df)
+
+        # derive a suggested schema name from the uploaded filename (sanitized)
+        base_name = os.path.splitext(file.filename)[0]
+        suggested_schema_name = base_name.strip().replace(" ", "_")
         
         return {
             "message": "Dataset profiled successfully. Please review and confirm the schema.",
+            "suggested_schema_name": suggested_schema_name,
             "inferred_schema": inferred_schema
         }
         
     except Exception as e:
         logger.error(f"❌ [routes] Error profiling dataset: {e}")
         raise HTTPException(status_code=500, detail=f"Profiling failed: {str(e)}")
-
 
 @router.post("/confirm-schema/", response_model=SchemaConfirmationResponse)
 async def confirm_schema(payload: SchemaConfirmationRequest):
@@ -213,13 +216,17 @@ async def auto_train_ml_model(schema_name: str, file: UploadFile = File(...)):
     try:
         contents = await file.read()
         if file.filename.endswith('.csv'):
+            logger.info(f"💬 [routes] Loading training dataset from file: {file.filename}")
             df = pd.read_csv(io.BytesIO(contents))
         elif file.filename.endswith('.json'):
+            logger.info(f"💬 [routes] Loading training dataset from file: {file.filename}")
             df = pd.read_json(io.BytesIO(contents))
         else:
+            logger.exception(f"🚨 [routes] Unsupported file format attempted for training: {file.filename}")
             raise HTTPException(status_code=415, detail="Unsupported file format.")
             
     except Exception as e:
+        logger.exception("🚨 [routes] Failed to read training data.")
         raise HTTPException(status_code=500, detail=f"Failed to read training data: {str(e)}")
 
     # 4. train and hot-reload!
@@ -228,7 +235,7 @@ async def auto_train_ml_model(schema_name: str, file: UploadFile = File(...)):
         df=df,
         numerical_cols=numerical_cols,
         categorical_cols=categorical_cols,
-        contamination=0.05 # Assuming 5% anomaly rate
+        contamination=0.05 # assuming 5% anomaly rate
     )
 
     if success:
@@ -244,3 +251,4 @@ async def auto_train_ml_model(schema_name: str, file: UploadFile = File(...)):
     else:
         logger.error(f"❌ [routes] ML Model training failed for schema '{schema_name}'. Check server logs for details.")
         raise HTTPException(status_code=500, detail="ML Model training failed. Check server logs.")
+    
