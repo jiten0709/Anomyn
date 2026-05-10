@@ -96,7 +96,7 @@ class ValidationService:
         # ==========================================
         # STEP 3: probabilistic anomaly detection (ML)
         # ==========================================
-        ml_result = self.ml_engine.evaluate_payload(clean_payload)
+        ml_result = self.ml_engine.evaluate_payload(clean_payload, self.schema_name)
         results.append(ml_result)
         
         # ML failures usually trigger a WARNING for human review, not an automatic FAIL, unless strict regulatory policy demands it.
@@ -107,7 +107,7 @@ class ValidationService:
         # ==========================================
         # STEP 4: compile final report
         # ==========================================
-        logger.info(f"✅ [validation svc] Validation completed for {transaction_id} with overall status: {overall_status}. Total rules executed: {len(results)}.")
+        logger.debug(f"✅ [validation svc] Validation completed for {transaction_id} with overall status: {overall_status}. Total rules executed: {len(results)}.")
         return ValidationReport(
             transaction_id=transaction_id,
             overall_status=overall_status,

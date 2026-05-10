@@ -1,4 +1,8 @@
-import os, joblib, threading, pandas as pd, numpy as np
+import os
+import joblib
+import threading
+import numpy as np
+import pandas as pd
 from typing import Any, Dict, List, Optional
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -27,11 +31,6 @@ class MLEngine:
         os.makedirs(model_dir, exist_ok=True)
         # Load all existing models at startup
         self._load_all_models()
-        
-        # ensure model directory exists for local testing
-        os.makedirs(model_dir, exist_ok=True)
-        
-        self._load_model()
 
     def _load_all_models(self):
         """Scans the model directory and pre-loads all existing .joblib models."""

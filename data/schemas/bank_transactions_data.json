@@ -1,0 +1,38 @@
+{
+  "TransactionID": {
+    "type": "string",
+    "required": true,
+    "description": "Inferred type: string. Nulls detected: 0"
+  },
+  "AccountID": {
+    "type": "string",
+    "required": true,
+    "description": "Inferred type: string. Nulls detected: 1"
+  },
+  "TransactionAmount": {
+    "type": "float",
+    "required": true,
+    "description": "Inferred type: float. Nulls detected: 0",
+    "gt": 0
+  },
+  "TransactionDate": {
+    "type": "datetime",
+    "required": false,
+    "description": "Inferred type: string. Nulls detected: 2"
+  },
+  "TransactionType": {
+    "type": "string",
+    "required": false,
+    "description": "Inferred type: string. Nulls detected: 2"
+  },
+  "Location": {
+    "type": "string",
+    "required": false,
+    "description": "Inferred type: string. Nulls detected: 3"
+  },
+  "AccountBalance": {
+    "type": "float",
+    "required": false,
+    "description": "Inferred type: string. Nulls detected: 2"
+  }
+}
