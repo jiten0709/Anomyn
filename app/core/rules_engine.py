@@ -87,7 +87,7 @@ class RulesEngine:
         
         # if field is completely missing (and not caught by schema), skip threshold check
         if field not in payload or payload[field] is None:
-            logger.info(f"💬 [rules engine] Field '{field}' is null/missing in payload; skipping threshold check for rule '{rule['rule_name']}'")
+            logger.debug(f"🔍 [rules engine] Field '{field}' is null/missing in payload; skipping threshold check for rule '{rule['rule_name']}'")
             return ValidationResult(
                 rule_name=rule["rule_name"],
                 status=ValidationStatus.PASS,

@@ -1,6 +1,9 @@
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ValidationError, Field
 from datetime import datetime, timezone
+import json
+import hashlib
+import uuid
 
 # import our engines
 from app.core.schema_engine import generate_dynamic_model
@@ -38,13 +41,75 @@ class ValidationService:
         self.schema_config = schema_config
         self.schema_name = schema_name
 
+    def _coerce_and_clean(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Coerce simple type conversions (e.g., strings to numbers/dates) and clean the payload before validation."""
+        cleaned: Dict[str, Any] = {}
+        for field, meta in self.schema_config.items():
+            val = raw.get(field, raw.get(field.lower()), raw.get(field.upper()), None)
+            if isinstance(val, str) and val.strip() == "":
+                cleaned[field] = None  
+                continue
+            if val is None:
+                cleaned[field] = None
+                continue
+            ftype = meta.get("type", "string").lower()
+            try:
+                if ftype in ('float', 'number', 'integer'):
+                    if isinstance(val, str):
+                        v = val.replace(",", "").strip()
+                    else:
+                        v = val
+                    cleaned[field] = float(v) 
+                    if ftype == 'integer':
+                        cleaned[field] = int(cleaned[field])
+                elif ftype in ('date', 'datetime'):
+                    if isinstance(val, (int, float)):
+                        cleaned[field] = datetime.fromtimestamp(float(val), tz=timezone.utc).isoformat()
+                    else:
+                        cleaned[field] = str(val).strip()
+                else:
+                    cleaned[field] = str(val).strip()
+            except Exception as e:
+                logger.debug(f"🔄 [validation svc] Coercion failed for field '{field}' with value '{val}': {e}. Treating as null.")
+                cleaned[field] = None
+
+        for k, v in raw.items():
+            if k not in cleaned:
+                cleaned[k] = v
+        return cleaned
+        
     def validate_record(self, raw_payload: Dict[str, Any]) -> ValidationReport:
         """
         Passes a single record through the entire compliance pipeline.
         """
         results: List[ValidationResult] = []
         overall_status = "PASS"
-        transaction_id = raw_payload.get("transaction_id", "UNKNOWN")
+
+        # derive a stable, unique transaction identifier:
+        # 1) prefer explicit id-like fields (common variants)
+        # 2) fall back to the first column/value (many datasets put id in first column)
+        # 3) deterministic hash of the whole payload (stable across re-process)
+        # 4) final fallback: random UUID
+        id_candidates = ["id", "ID", "Id"]
+        transaction_id = None
+        for k in id_candidates:
+            if k in raw_payload and raw_payload.get(k) not in (None, ""):
+                transaction_id = str(raw_payload.get(k))
+                break
+
+        if transaction_id is None and isinstance(raw_payload, dict) and raw_payload:
+            first_key = next(iter(raw_payload.keys()))
+            first_val = raw_payload.get(first_key)
+            if first_val not in (None, ""):
+                transaction_id = f"{first_key}:{first_val}"
+
+        if transaction_id is None:
+            try:
+                payload_bytes = json.dumps(raw_payload, sort_keys=True, default=str).encode("utf-8")
+                transaction_id = hashlib.sha256(payload_bytes).hexdigest()
+            except Exception:
+                transaction_id = str(uuid.uuid4())
 
         # ==========================================
         # STEP 1: dynamic schema validation (integrity check)
@@ -52,8 +117,10 @@ class ValidationService:
         DynamicModel = generate_dynamic_model(self.schema_name, self.schema_config)
         
         try:
-            # this handles missing value detection and basic type checking
-            validated_data = DynamicModel(**raw_payload)
+            # pre-clean/coerce the payload to handle common data issues before strict validation
+            prepared = self._coerce_and_clean(raw_payload)
+            # this handles missing value detection, type checking
+            validated_data = DynamicModel(**prepared)
             clean_payload = validated_data.model_dump()
             schema_valid = True
             

@@ -26,19 +26,12 @@ ROW_LIMIT = int(os.getenv("ROW_LIMIT", 1000))
 
 router = APIRouter(prefix="/api/v1", tags=["Anomyn"])
 
-MOCK_DB_RULES = [
-    {
-        "rule_name": "high_value_transaction_limit",
-        "rule_type": "THRESHOLD",
-        "target_field": "amount",
-        "parameters": {"operator": "<=", "value": 50000},
-        "severity": "CRITICAL"
-    }
-]
-
-# persist/load path for schemas (simple persistence for prototype)
+# persist/load path for schemas and rules (simple persistence for prototype)
 SCHEMA_DIR = os.path.join(os.getcwd(), "data", "schemas")
 os.makedirs(SCHEMA_DIR, exist_ok=True)
+
+RULES_DIR = os.path.join(os.getcwd(), "data", "rules")
+os.makedirs(RULES_DIR, exist_ok=True)
 
 def load_schema_on_demand(schema_name: str) -> Optional[Dict[str, Any]]:
     """Loads a schema directly from disk if it exists, otherwise returns None."""
@@ -52,6 +45,19 @@ def load_schema_on_demand(schema_name: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"⚠️ Failed to load schema '{schema_name}' from disk: {e}")
             return None
     return None
+
+def load_rules_on_demand(dataset_name: str) -> List[Dict[str, Any]]:
+    """Loads rules dynamically from disk for a specific dataset/schema."""
+    rules_path = os.path.join(RULES_DIR, f"{dataset_name}.json")
+    if os.path.exists(rules_path):
+        try:
+            with open(rules_path, "r", encoding="utf-8") as fh:
+                logger.info(f"💬 Loading rules for '{dataset_name}' from disk.")
+                return json.load(fh)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load rules for '{dataset_name}': {e}")
+    return []
+
 # initialize ml engine globally (singleton pattern for api)
 ml_engine_instance = MLEngine()
 
@@ -71,6 +77,20 @@ class ValidationSummaryResponse(BaseModel):
     total_failed: int = Field(..., description="Total number of records that failed any validation")
     total_warnings: int = Field(..., description="Total number of records that triggered warnings")
     reports: List[ValidationReport] = Field(..., description="Detailed validation reports for each record")
+
+class ValidationSummaryResponse(BaseModel):
+    total_processed: int = Field(..., description="Total number of records processed")
+    total_passed: int = Field(..., description="Total number of records that passed all validations")
+    total_failed: int = Field(..., description="Total number of records that failed any validation")
+    total_warnings: int = Field(..., description="Total number of records that triggered warnings")
+    reports: List[ValidationReport] = Field(..., description="Detailed validation reports for each record")
+
+class CreateRulesRequest(BaseModel):
+    rules: List[Dict[str, Any]] = Field(..., description="List of rule configurations for the dataset")
+
+class CreateRulesResponse(BaseModel):
+    message: str = Field(..., description="Confirmation message")
+    dataset_name: str = Field(..., description="The dataset name")
 
 # --- endpoints ---
 
@@ -179,6 +199,26 @@ async def confirm_schema(payload: SchemaConfirmationRequest):
         schema_name=schema_name
     )
 
+@router.post("/create-rules/{dataset_name}", response_model=CreateRulesResponse)
+async def create_rules(dataset_name: str, payload: CreateRulesRequest):
+    """
+    Creates or updates deterministic rules dynamically for a specific dataset.
+    """
+    try:
+        os.makedirs(RULES_DIR, exist_ok=True)
+        rules_path = os.path.join(RULES_DIR, f"{dataset_name}.json")
+        with open(rules_path, "w", encoding="utf-8") as fh:
+            json.dump(payload.rules, fh, indent=2)
+        logger.info(f"💬 Persisted rules for dataset '{dataset_name}' to disk.")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to persist rules for '{dataset_name}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to save rules.")
+    
+    return CreateRulesResponse(
+        message=f"Rules for dataset '{dataset_name}' saved successfully.",
+        dataset_name=dataset_name
+    )
+
 @router.post("/validate/{schema_name}", response_model=ValidationSummaryResponse)
 async def run_compliance_validation(schema_name: str, file: UploadFile = File(...)):
     """
@@ -190,10 +230,15 @@ async def run_compliance_validation(schema_name: str, file: UploadFile = File(..
         logger.warning(f"⚠️ [routes] Validation attempted with non-existent schema: {schema_name}")
         raise HTTPException(status_code=404, detail=f"Schema '{schema_name}' not found. Please confirm it first.")
     
+    # load rules dynamically for this specific dataset
+    active_rules = load_rules_on_demand(schema_name)
+    if not active_rules:
+        logger.info(f"💬 [routes] No rules found for '{schema_name}'. Proceeding with schema and ML validation only.")
+    
     # instantiate the validation service
     validation_svc = ValidationService(
         ml_engine=ml_engine_instance,
-        active_rules=MOCK_DB_RULES,
+        active_rules=active_rules,
         schema_config=schema_config,
         schema_name=schema_name
     )
