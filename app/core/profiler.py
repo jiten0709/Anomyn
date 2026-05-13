@@ -32,14 +32,7 @@ def map_pandas_dtype_to_engine_type(pd_dtype: str) -> str:
 
 def analyze_dataset(df: pd.DataFrame, sample_size: int = PROFILER_SAMPLE_SIZE) -> Dict[str, Dict[str, Any]]:
     """
-    Profiles a pandas DataFrame to infer a base schema configuration.
-    
-    Args:
-        df (pd.DataFrame): The ingested dataset.
-        sample_size (int): Max rows to analyze to save memory/CPU on massive files.
-        
-    Returns:
-        dict: A proposed schema configuration ready for user confirmation.
+    Profiles a pandas DataFrame to infer a base schema configuration and suggest business rules.
     """
     if df.empty:
         logger.error("🚨 [profiler] Attempted to profile an empty dataset.")
@@ -65,6 +58,7 @@ def analyze_dataset(df: pd.DataFrame, sample_size: int = PROFILER_SAMPLE_SIZE) -
                 pass # if it fails, leave it as a string/object
 
     inferred_schema: Dict[str, Dict[str, Any]] = {}
+    suggested_rules: list = []
 
     # 3. build the schema dict
     for column in df_sample.columns:
@@ -84,14 +78,37 @@ def analyze_dataset(df: pd.DataFrame, sample_size: int = PROFILER_SAMPLE_SIZE) -
             "description": f"Inferred type: {engine_type}. Nulls detected: {null_count}"
         }
 
-        # 4. optional: infer basic numerical bounds for thresholds
+        # 4. auto-generate rules for numeric fields based on their min/max boundaries
         if engine_type in ['integer', 'float'] and not series.isna().all():
-            min_val = series.min()
-            # if the minimum value is > 0, propose a "greater than 0" threshold
+            min_val = float(series.min())
+            max_val = float(series.max())
+            
+            # Suggest a min threshold
+            suggested_rules.append({
+                "rule_name": f"{column}_min_threshold",
+                "rule_type": "THRESHOLD",
+                "target_field": column,
+                "parameters": {"operator": ">=", "value": min_val},
+                "severity": "WARNING"
+            })
+            
+            # Suggest a max threshold
+            suggested_rules.append({
+                "rule_name": f"{column}_max_threshold",
+                "rule_type": "THRESHOLD",
+                "target_field": column,
+                "parameters": {"operator": "<=", "value": max_val},
+                "severity": "WARNING"
+            })
+
+            # if the minimum value is > 0, propose a "greater than 0" threshold for schema
             if min_val >= 0:
                 field_config["gt"] = 0
 
         inferred_schema[column] = field_config
 
-    logger.info(f"✅ [profiler] Successfully profiled {len(inferred_schema)} columns.")
-    return inferred_schema
+    logger.info(f"✅ [profiler] Schema inference complete. Inferred schema for {len(inferred_schema)} fields with {len(suggested_rules)} suggested rules.")
+    return {
+        "schema": inferred_schema,
+        "suggested_rules": suggested_rules
+    }

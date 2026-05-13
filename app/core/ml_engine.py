@@ -22,14 +22,14 @@ class MLEngine:
     Uses an Isolation Forest to score transactions based on historical patterns.
     """
     
-    def __init__(self, model_dir: str = "data/models", model_name: str = "anomym_model.joblib"):
+    def __init__(self, model_dir: str = "data/models"):
         self.model_dir = model_dir
-        self.pipelines: Dict[str, Pipeline] = {} # Store multiple models by dataset name
+        self.pipelines: Dict[str, Pipeline] = {} # store multiple models by dataset name
         self._lock = threading.Lock()
         
         # ensure model directory exists for local testing
         os.makedirs(model_dir, exist_ok=True)
-        # Load all existing models at startup
+        # load all existing models at startup
         self._load_all_models()
 
     def _load_all_models(self):
@@ -57,7 +57,18 @@ class MLEngine:
         logger.info(f"💬 [ml engine] Training Anomaly Detection model for '{dataset_name}' on {len(df)} records...")
         
         try:
-            # 1. Feature engineering pipeline
+            # force conversion to numeric. Invalid parsing (like 'Vdtfonuycx' in amount) will be set to NaN.
+            # this allows the SimpleImputer(median) to work properly.
+            for col in numerical_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Force categorical columns to string to prevent mixed-type errors
+            for col in categorical_cols:
+                if col in df.columns:
+                    df[col] = df[col].astype(str).fillna("")
+
+            # 1. feature engineering pipeline
             num_pipeline = Pipeline(steps=[
                 ('imputer', SimpleImputer(strategy='median')),
                 ('scaler', StandardScaler())
@@ -74,20 +85,20 @@ class MLEngine:
                     ('cat', cat_pipeline, categorical_cols)
                 ])
 
-            # 2. Build pipeline
+            # 2. build pipeline
             new_pipeline = Pipeline(steps=[
                 ('preprocessor', preprocessor),
                 ('classifier', IsolationForest(contamination=contamination, random_state=42, n_jobs=-1))
             ])
 
-            # 3. Train
+            # 3. train
             new_pipeline.fit(df)
             
-            # 4. Save to disk
+            # 4. save to disk
             save_path = os.path.join(self.model_dir, f"{dataset_name}.joblib")
             joblib.dump(new_pipeline, save_path)
             
-            # 5. Swap atomically in memory
+            # 5. swap atomically in memory
             with self._lock:
                 self.pipelines[dataset_name] = new_pipeline
 

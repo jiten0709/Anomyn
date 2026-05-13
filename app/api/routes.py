@@ -114,6 +114,7 @@ async def profile_uploaded_dataset(file: UploadFile = File(...)):
             "message": f"Existing schema '{suggested_schema_name}' loaded successfully. No profiling needed.",
             "schema_name": suggested_schema_name,
             "inferred_schema": existing_schema,
+            "suggested_rules": [],
             "row_count": None,
             "column_count": len(existing_schema)
         }
@@ -140,13 +141,14 @@ async def profile_uploaded_dataset(file: UploadFile = File(...)):
             logger.warning("⚠️ [routes] Uploaded file is empty or contains no data rows.")
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
         
-        # profile the dataset to infer schema
-        inferred_schema = analyze_dataset(df)
+        # profile the dataset to infer schema and suggest rules
+        analysis = analyze_dataset(df)
         
         return {
             "message": "New dataset profiled successfully. Please review and confirm the schema.",
             "suggested_schema_name": suggested_schema_name,
-            "inferred_schema": inferred_schema,
+            "inferred_schema": analysis["schema"],
+            "suggested_rules": analysis["suggested_rules"],
             "row_count": len(df),
             "column_count": len(df.columns)
         }
@@ -202,7 +204,7 @@ async def confirm_schema(payload: SchemaConfirmationRequest):
 @router.post("/create-rules/{dataset_name}", response_model=CreateRulesResponse)
 async def create_rules(dataset_name: str, payload: CreateRulesRequest):
     """
-    Creates or updates deterministic rules dynamically for a specific dataset.
+    Step 3: Creates or updates deterministic rules dynamically for a specific dataset.
     """
     try:
         os.makedirs(RULES_DIR, exist_ok=True)
@@ -219,74 +221,6 @@ async def create_rules(dataset_name: str, payload: CreateRulesRequest):
         dataset_name=dataset_name
     )
 
-@router.post("/validate/{schema_name}", response_model=ValidationSummaryResponse)
-async def run_compliance_validation(schema_name: str, file: UploadFile = File(...)):
-    """
-    Step 3: Upload a dataset to validate it against the confirmed schema, deterministic rules, and ML anomaly detection.
-    """
-    # load schema directly from disk
-    schema_config = load_schema_on_demand(schema_name)
-    if schema_config is None:
-        logger.warning(f"⚠️ [routes] Validation attempted with non-existent schema: {schema_name}")
-        raise HTTPException(status_code=404, detail=f"Schema '{schema_name}' not found. Please confirm it first.")
-    
-    # load rules dynamically for this specific dataset
-    active_rules = load_rules_on_demand(schema_name)
-    if not active_rules:
-        logger.info(f"💬 [routes] No rules found for '{schema_name}'. Proceeding with schema and ML validation only.")
-    
-    # instantiate the validation service
-    validation_svc = ValidationService(
-        ml_engine=ml_engine_instance,
-        active_rules=active_rules,
-        schema_config=schema_config,
-        schema_name=schema_name
-    )
-
-    summary = {
-        "total_processed": 0,
-        "total_passed": 0,
-        "total_failed": 0,
-        "total_warnings": 0,
-        "reports": [],
-        "processing_time_seconds": 0.0
-    }
-    start_time = time.time() 
-
-    try:
-        # stream the file securely using our SafeFileParser
-        async for raw_row in SafeFileParser.process_upload(file):
-            if summary["total_processed"] >= ROW_LIMIT:
-                logger.warning(f"⚠️ [routes] Row limit ({ROW_LIMIT}) reached. Stopping validation.")
-                break
-
-            summary["total_processed"] += 1
-            try:
-                # execute full compliance pipeline
-                report = validation_svc.validate_record(raw_row)
-                summary["reports"].append(report)
-                
-                # tally metrics
-                if report.overall_status == "PASS":
-                    summary["total_passed"] += 1
-                elif report.overall_status == "FAIL":
-                    summary["total_failed"] += 1
-                elif report.overall_status == "WARNING":
-                    summary["total_warnings"] += 1
-            except Exception as row_e:
-                logger.error(f"❌ [routes] Error validating row {summary['total_processed']}: {row_e}")
-
-        summary["processing_time_seconds"] = time.time() - start_time
-        logger.info(f"✅ [routes] Validation completed for {summary['total_processed']} records in {summary['processing_time_seconds']:.2f}s.")
-        return summary
-
-    except HTTPException as http_ex:
-        logger.error(f"❌ [routes] HTTP error during validation: {http_ex.detail}")
-        raise http_ex
-    except Exception as e:
-        logger.exception("🚨 [routes] Validation execution failed.")
-        raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
-    
 @router.post("/train-model/", response_model=Dict[str, Any])
 async def train_model(
     file: UploadFile = File(...),
@@ -295,7 +229,7 @@ async def train_model(
     force: bool = Form(False)
 ):
     """
-    Trains an ML model based on the uploaded file name.
+    Step 4: Trains an ML model based on the uploaded file name.
     Behavior:
     - Derives schema_name / dataset_name from uploaded filename (filename without ext).
     - Validates that a confirmed schema exists for that name.
@@ -414,3 +348,72 @@ async def train_model(
 
     logger.error(f"❌ [routes] ML Model training failed for schema '{schema_name}'. Check server logs for details.")
     raise HTTPException(status_code=500, detail="ML Model training failed. Check server logs.")
+
+@router.post("/validate/{schema_name}", response_model=ValidationSummaryResponse)
+async def run_compliance_validation(schema_name: str, file: UploadFile = File(...)):
+    """
+    Step 5: Upload a dataset to validate it against the confirmed schema, deterministic rules, and ML anomaly detection.
+    """
+    # load schema directly from disk
+    schema_config = load_schema_on_demand(schema_name)
+    if schema_config is None:
+        logger.warning(f"⚠️ [routes] Validation attempted with non-existent schema: {schema_name}")
+        raise HTTPException(status_code=404, detail=f"Schema '{schema_name}' not found. Please confirm it first.")
+    
+    # load rules dynamically for this specific dataset
+    active_rules = load_rules_on_demand(schema_name)
+    if not active_rules:
+        logger.info(f"💬 [routes] No rules found for '{schema_name}'. Proceeding with schema and ML validation only.")
+    
+    # instantiate the validation service
+    validation_svc = ValidationService(
+        ml_engine=ml_engine_instance,
+        active_rules=active_rules,
+        schema_config=schema_config,
+        schema_name=schema_name
+    )
+
+    summary = {
+        "total_processed": 0,
+        "total_passed": 0,
+        "total_failed": 0,
+        "total_warnings": 0,
+        "reports": [],
+        "processing_time_seconds": 0.0
+    }
+    start_time = time.time() 
+
+    try:
+        # stream the file securely using our SafeFileParser
+        async for raw_row in SafeFileParser.process_upload(file):
+            if summary["total_processed"] >= ROW_LIMIT:
+                logger.warning(f"⚠️ [routes] Row limit ({ROW_LIMIT}) reached. Stopping validation.")
+                break
+
+            summary["total_processed"] += 1
+            try:
+                # execute full compliance pipeline
+                report = validation_svc.validate_record(raw_row)
+                summary["reports"].append(report)
+                
+                # tally metrics
+                if report.overall_status == "PASS":
+                    summary["total_passed"] += 1
+                elif report.overall_status == "FAIL":
+                    summary["total_failed"] += 1
+                elif report.overall_status == "WARNING":
+                    summary["total_warnings"] += 1
+            except Exception as row_e:
+                logger.error(f"❌ [routes] Error validating row {summary['total_processed']}: {row_e}")
+
+        summary["processing_time_seconds"] = time.time() - start_time
+        logger.info(f"✅ [routes] Validation completed for {summary['total_processed']} records in {summary['processing_time_seconds']:.2f}s.")
+        return summary
+
+    except HTTPException as http_ex:
+        logger.error(f"❌ [routes] HTTP error during validation: {http_ex.detail}")
+        raise http_ex
+    except Exception as e:
+        logger.exception("🚨 [routes] Validation execution failed.")
+        raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
+    

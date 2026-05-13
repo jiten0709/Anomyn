@@ -1,0 +1,22 @@
+[
+  {
+    "rule_name": "TransactionAmount_min_threshold",
+    "rule_type": "THRESHOLD",
+    "target_field": "TransactionAmount",
+    "parameters": {
+      "operator": ">=",
+      "value": 7.08
+    },
+    "severity": "WARNING"
+  },
+  {
+    "rule_name": "TransactionAmount_max_threshold",
+    "rule_type": "THRESHOLD",
+    "target_field": "TransactionAmount",
+    "parameters": {
+      "operator": "<=",
+      "value": 123874932423
+    },
+    "severity": "WARNING"
+  }
+]

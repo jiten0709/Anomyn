@@ -43,10 +43,18 @@ class ValidationService:
 
     def _coerce_and_clean(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Coerce simple type conversions (e.g., strings to numbers/dates) and clean the payload before validation."""
+        Coerce simple type conversions (e.g., strings to numbers/dates) and clean the payload before validation.
+        """
         cleaned: Dict[str, Any] = {}
         for field, meta in self.schema_config.items():
-            val = raw.get(field, raw.get(field.lower()), raw.get(field.upper()), None)
+            # check for the field in original, lowercase, and uppercase 
+            val = None
+            possible_keys = [field, field.lower(), field.upper()]
+            for key in possible_keys:
+                if key in raw:
+                    val = raw[key]
+                    break
+            
             if isinstance(val, str) and val.strip() == "":
                 cleaned[field] = None  
                 continue
