@@ -1,6 +1,7 @@
 from typing import Any, Dict, List
 from pydantic import BaseModel
 from enum import Enum
+import pandas as pd
 
 # logging setup
 from app.utils.logging_setup import get_logger
@@ -136,7 +137,6 @@ class RulesEngine:
     def _evaluate_cross_field(self, rule: Dict[str, Any], payload: Dict[str, Any]) -> ValidationResult:
         """
         Evaluates dependencies between fields.
-        Example: IF 'transaction_type' == 'INTERNATIONAL', THEN 'destination_country' MUST NOT BE NULL.
         """
         primary_field = rule["target_field"]
         params = rule["parameters"]
@@ -161,4 +161,79 @@ class RulesEngine:
             message="Cross-field validation passed.",
             severity=rule["severity"]
         )
+    
+    @staticmethod
+    def generate_smart_threshold_rules(
+        df: pd.DataFrame,
+        field_name: str,
+        common_thresholds: List[float] = None,
+        min_samples: int = 30,
+        sigma_multiplier: float = 3.0,
+        max_fraction_tol: float = 0.99,
+        min_std_ratio: float = 0.01
+    ):
+        """
+        Generate a non-trivial upper threshold rule for `field_name`.
+        Returns None when a meaningful rule should NOT be created (e.g., too few samples,
+        near-zero variance, or computed threshold is essentially the observed max).
+
+        Heuristics:
+        - Require at least `min_samples` non-null observations.
+        - Exclude extreme outliers via IQR before computing mean/std.
+        - Use mean + sigma_multiplier * std for threshold.
+        - Snap to a provided common_thresholds list (choose smallest >= computed limit).
+        - Reject rule if the resulting threshold is within `max_fraction_tol` of observed max.
+        - Reject rule if std is negligible relative to mean (controlled by min_std_ratio).
+        """
+        series = pd.to_numeric(df[field_name], errors='coerce').dropna()
+        n = len(series)
+        if n < min_samples:
+            logger.debug(f"🔍 [rule-gen] Not enough samples for {field_name} ({n} < {min_samples}); skipping rule generation.")
+            return None
+
+        Q1 = series.quantile(0.25)
+        Q3 = series.quantile(0.75)
+        IQR = Q3 - Q1
+        # filter extreme IQR outliers
+        filtered = series[~((series < (Q1 - 1.5 * IQR)) | (series > (Q3 + 1.5 * IQR)))]
+        if filtered.empty:
+            logger.debug(f"🔍 [rule-gen] After IQR filtering no data remains for {field_name}; skipping.")
+            return None
+
+        mean_val = filtered.mean()
+        std_val = filtered.std()
+        if std_val == 0:
+            logger.debug(f"🔍 [rule-gen] Zero variance for {field_name}; skipping.")
+            return None
+        if abs(mean_val) > 0 and (std_val / abs(mean_val)) < min_std_ratio:
+            logger.debug(f"🔍 [rule-gen] Low relative std for {field_name} (std/mean={std_val/abs(mean_val):.4f} < {min_std_ratio}); skipping.")
+            return None
+
+        upper_limit = mean_val + (sigma_multiplier * std_val)
+        observed_max = series.max()
+
+        # If computed limit is effectively the observed max (within tolerance), skip trivial rule
+        if observed_max != 0 and upper_limit >= observed_max * max_fraction_tol:
+            logger.debug(f"🔍 [rule-gen] Computed limit {upper_limit:.2f} is near observed max {observed_max:.2f}; skipping trivial rule.")
+            return None
+
+        # Snap to common thresholds if provided (choose smallest >= upper_limit)
+        if common_thresholds:
+            valid_thresholds = sorted([t for t in common_thresholds if t >= upper_limit])
+            if valid_thresholds:
+                snapped = valid_thresholds[0]
+                if observed_max != 0 and snapped >= observed_max * max_fraction_tol:
+                    logger.debug(f"🔍 [rule-gen] Snapped threshold {snapped} is near observed max {observed_max:.2f}; skipping.")
+                    return None
+                upper_limit = snapped
+
+        rule_value = round(float(upper_limit), 2)
+        logger.info(f"✅ [rule-gen] Generated threshold for {field_name}: <= {rule_value} (samples={n})")
+        return {
+            "rule_name": f"{field_name}_upper_limit",
+            "rule_type": "THRESHOLD",
+            "target_field": field_name,
+            "parameters": {"operator": "<=", "value": rule_value},
+            "severity": "CRITICAL"
+        }
     

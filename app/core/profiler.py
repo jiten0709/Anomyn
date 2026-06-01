@@ -78,28 +78,19 @@ def analyze_dataset(df: pd.DataFrame, sample_size: int = PROFILER_SAMPLE_SIZE) -
             "description": f"Inferred type: {engine_type}. Nulls detected: {null_count}"
         }
 
-        # 4. auto-generate rules for numeric fields based on their min/max boundaries
+        # 4. auto-generate rules for numeric fields based on statistical thresholds
         if engine_type in ['integer', 'float'] and not series.isna().all():
+            # Generate smart upper limit instead of hard min/max boundaries
+            from app.core.rules_engine import RulesEngine
+            smart_rule = RulesEngine.generate_smart_threshold_rules(
+                df=df_sample, 
+                field_name=column,
+                common_thresholds=[100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+            )
+            if smart_rule:
+                suggested_rules.append(smart_rule)
+
             min_val = float(series.min())
-            max_val = float(series.max())
-            
-            # Suggest a min threshold
-            suggested_rules.append({
-                "rule_name": f"{column}_min_threshold",
-                "rule_type": "THRESHOLD",
-                "target_field": column,
-                "parameters": {"operator": ">=", "value": min_val},
-                "severity": "WARNING"
-            })
-            
-            # Suggest a max threshold
-            suggested_rules.append({
-                "rule_name": f"{column}_max_threshold",
-                "rule_type": "THRESHOLD",
-                "target_field": column,
-                "parameters": {"operator": "<=", "value": max_val},
-                "severity": "WARNING"
-            })
 
             # if the minimum value is > 0, propose a "greater than 0" threshold for schema
             if min_val >= 0:
